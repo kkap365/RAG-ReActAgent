@@ -1,3 +1,22 @@
+﻿> **二次开发说明**
+>
+> 本项目 fork 自 [MoMoM101/RAG-ReActAgent](https://github.com/MoMoM101/RAG-ReActAgent)，
+> 检索、切片、引用校验等核心链路为原作者实现。
+>
+> 本仓库在此基础上的改动集中在**多 worker 部署下的一致性与可用性**：
+>
+> - **答案缓存迁移至 Redis**：原实现缓存与版本号都在进程内存里，多 worker 各自失效，
+>   入库后其他进程仍返回旧答案；改为 Redis 共享版本号计数，一次入库全员旧 key 不可达。
+> - **修复缓存失效全清缺陷**：原 `invalidate` 直接调用 `clear()` 全量删除，
+>   而版本号已在 cache key 中、旧条文本就不可达；改为只更新版本号 + TTL 兜底，
+>   去掉多余的 O(N) 扫描。
+> - **限流计数迁移至 Redis 并补降级**：计数从进程内存改为 Redis 存储，
+>   避免额度随 worker 数放大；同时接入 `in_memory_fallback` 实现 fail-open——
+>   Redis 不可达时退化为内存限流并告警，请求不因限流组件故障返回 500。
+>
+> 相关文件：`backend/rag/redis_answer_cache.py`、`backend/rag/answer_cache.py`、
+> `backend/limiter.py`、`backend/config.py`
+
 # RAG Agent：本地知识库智能助手
 
 > 一个强调检索质量、证据引用、回答校验、任务恢复和本地数据边界的开源 RAG Agent。
@@ -1167,3 +1186,4 @@ cd backend
 ---
 
 更完整的项目优势与评测参数见 [项目介绍](docs/PROJECT_INTRODUCTION.md)，架构、配置、运维和安全边界见 [项目参考](docs/PROJECT_REFERENCE.md)。
+
