@@ -233,10 +233,21 @@ _cache: AnswerCache | None = None
 def get_answer_cache() -> AnswerCache:
     global _cache
     if _cache is None:
-        _cache = AnswerCache(
-            ttl=settings.rag_answer_cache_ttl_seconds,
-            max_entries=settings.rag_answer_cache_max_entries,
-        )
+        backend = getattr(settings, "rag_answer_cache_backend", "memory")
+        if backend == "redis" and getattr(settings, "redis_url", ""):
+            from .redis_answer_cache import RedisAnswerCache
+            _cache = RedisAnswerCache(
+                url=settings.redis_url,
+                ttl=settings.rag_answer_cache_ttl_seconds,
+                max_entries=settings.rag_answer_cache_max_entries,
+            )
+            logger.info("answer cache backend=redis")
+        else:
+            _cache = AnswerCache(
+                ttl=settings.rag_answer_cache_ttl_seconds,
+                max_entries=settings.rag_answer_cache_max_entries,
+            )
+            logger.info("answer cache backend=memory")
     return _cache
 
 

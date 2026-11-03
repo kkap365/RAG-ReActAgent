@@ -129,7 +129,8 @@ class Settings(BaseSettings):
     rag_answer_cache_enabled: bool = True
     rag_answer_cache_ttl_seconds: int = 300
     rag_answer_cache_max_entries: int = 1000
-
+    rag_answer_cache_backend: str = "memory"   # memory | redis
+    redis_url: str = ""                        # e.g. redis://redis:6379/0
     # Database pruning — prevent unbounded growth
     data_retention_days: int = Field(default=90, ge=7, le=3650)
     audit_retention_days: int = Field(default=365, ge=7, le=3650)
