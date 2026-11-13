@@ -1,4 +1,4 @@
-﻿> **二次开发说明**
+> **二次开发说明**
 >
 > 本项目 fork 自 [MoMoM101/RAG-ReActAgent](https://github.com/MoMoM101/RAG-ReActAgent)，
 > 检索、切片、引用校验等核心链路为原作者实现。
@@ -10,12 +10,104 @@
 > - **修复缓存失效全清缺陷**：原 `invalidate` 直接调用 `clear()` 全量删除，
 >   而版本号已在 cache key 中、旧条文本就不可达；改为只更新版本号 + TTL 兜底，
 >   去掉多余的 O(N) 扫描。
+> - **缓存失效改为按文档维度**：第一版用全局版本号，任何文档入库都让全部缓存失效，
+>   命中率吃亏；第二版在写入缓存时记录这份答案依赖了哪些文档，入库时只 `INCR`
+>   该文档的版本号，只失效真正受影响的条目。详见下方「缓存失效的两次迭代」。
 > - **限流计数迁移至 Redis 并补降级**：计数从进程内存改为 Redis 存储，
 >   避免额度随 worker 数放大；同时接入 `in_memory_fallback` 实现 fail-open——
 >   Redis 不可达时退化为内存限流并告警，请求不因限流组件故障返回 500。
 >
 > 相关文件：`backend/rag/redis_answer_cache.py`、`backend/rag/answer_cache.py`、
-> `backend/limiter.py`、`backend/config.py`
+> `backend/limiter.py`、`backend/config.py`、`backend/agent/loop_support.py`、
+> `backend/api/documents.py`、`backend/rag/pipeline.py`
+
+---
+
+# 缓存失效的两次迭代
+
+## 第一版：全局版本号
+
+缓存 key 里放一个全局 `collection_version`，任何文档入库就 `INCR` 它。
+
+**问题**：一次入库让**所有**缓存失效。大部分缓存条目与新入库文档无关，
+命中率被这份"宁可错杀"的粗糙策略拖死。
+
+## 第二版：按文档维度
+
+核心思路：**缓存 key 只依赖"这份答案实际用到了哪些文档"的版本号**。
+
+写入缓存时：
+1. 从检索结果 `sources` 里取出 `document_id`（去重，top-8 内）
+2. 查每个文档当前的版本号 `docver:{doc_id}`
+3. `deps_token = sha256("docA:1|docB:3").hexdigest()[:16]`
+4. 这个 token 作为版本号参与 cache key 计算
+
+入库时：
+- `INCR docver:{doc_id}` —— **只影响这一个文档**
+
+**全局版本号保留，但降级为兜底**：当 `sources` 里识别不出任何 `document_id` 时
+（比如"文档中没有相关信息"这类无来源的拒答），`deps_token` 退回全局版本，
+保证这类条目仍能被整体失效。**正确性优先于命中率。**
+
+四处入库路径都接入了 `bump_document_version`：
+清空全部、删除文档、重新处理、新文档入库。
+
+## 验证
+
+分两级，因为两者能证明的东西不同：
+
+| 层级 | 脚本 | 证明什么 |
+|---|---|---|
+| **单元级** | `backend/manual_docver_check.py` | `deps_token` 的五条行为断言：同批稳定、区分依赖、引用者失效、**无关者保留**、无 doc_id 兜底 |
+| **环境级** | `docver_e2e.py` | 在真实容器 + 真实 Redis 里：入库 B 之后，依赖 A 的 token **不变**；`docver(B)` 被正确创建；`bump(A)` 后 token 变化 |
+
+单元级跑法（本地需要 Redis）：
+
+```bash
+cd backend && python manual_docver_check.py
+```
+
+环境级跑法（需要整套容器起来）：
+
+```bash
+docker compose cp docver_e2e.py backend:/app/docver_e2e.py
+docker compose exec -T backend python /app/docver_e2e.py
+```
+
+## 一个被记录下来的测试设计错误
+
+第一版端到端验证是这样的：
+
+> 上传文档 A → 问 Q1 两次（确认命中）→ 上传文档 B → 再问 Q1
+> → 如果 Q1 命中，说明按文档失效生效。
+
+**跑出来永远是 FAIL。** 排查后发现：
+
+1. 库中只有 2 个 chunk，检索 top-k 会把 A、B 都返回
+2. cache key 里除 `deps_token` 还有 `retrieval_hash`（top-8 chunk_id 的哈希）
+3. 入库 B 之后，Q1 的检索结果从「1 个 chunk」变成「2 个 chunk」
+4. `retrieval_hash` 变了 → **cache key 变了 → miss**
+
+**这不是缓存失效的 bug，是测试没有隔离变量。** 入库动作同时改变了"文档版本"
+和"检索结果"两件事，而只有前者是我们要验证的。
+
+修正方式：不经过 chat，直接用运行中的 `RedisAnswerCache` 实例算
+`deps_token`，在入库 B 前后对比取值 —— 检索这个变量被排除后，四条断言全部通过。
+
+第一版脚本 `e2e_cache_check.py` 保留在仓库里作为对照。
+
+## 已知限制
+
+- **每次写缓存多一次 `MGET`**：top-8 内去重后的文档数通常 1–5 个，
+  一次 Redis 往返，代价可接受；但文档依赖数量上升时会线性增长。
+- **哈希截断 16 位（64 bit）**：理论上存在碰撞导致错误命中的可能。
+  按当前条目量级概率可忽略，若缓存规模大幅上升应改为完整哈希。
+- **文档依赖只取 top-8**：若答案实际依据的文档排在 top-8 之外，其版本变化
+  不会使该条目失效，只能等 TTL（300s）兜底。
+- **内存后端不支持按文档失效**：`deps_token` 在内存实现里直接返回全局版本，
+  行为退回到第一版。这是刻意取舍——内存版多 worker 本来就不共享缓存。
+
+---
 
 # RAG Agent：本地知识库智能助手
 
