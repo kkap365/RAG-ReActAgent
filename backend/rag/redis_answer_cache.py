@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -56,6 +57,43 @@ class RedisAnswerCache(AnswerCache):
             logger.warning("redis cache bump failed: %s", e)
             return -1
 
+    # ── 按文档维度的版本号 ───────────────────────────────────────
+
+    def _docver_key(self, doc_id: str) -> str:
+        return f"{self._prefix}docver:{doc_id}"
+
+    def document_version(self, doc_id: str) -> int:
+        try:
+            v = self._redis.get(self._docver_key(doc_id))
+            return int(v) if v is not None else 0
+        except (redis.RedisError, ValueError) as e:
+            logger.warning("redis docver read failed for %s: %s", doc_id, e)
+            return 0
+
+    def bump_document_version(self, doc_id: str) -> int:
+        try:
+            new_v = int(self._redis.incr(self._docver_key(doc_id)))
+            logger.info("answer cache doc invalidated: doc=%s version=%d", doc_id, new_v)
+            return new_v
+        except redis.RedisError as e:
+            logger.warning("redis docver bump failed for %s: %s", doc_id, e)
+            return -1
+
+    def deps_token(self, sources: list[dict]) -> str:
+        """由「文档 id + 各自版本号」算出的 token。
+
+        只有引用过的文档版本变了，token 才变 —— 这是选择性失效的关键。
+        识别不出任何 doc_id 时退回全局版本，保证正确性优先于命中率。
+        """
+        pairs = []
+        for s in sources[:8]:
+            doc_id = s.get("document_id") or s.get("document_key") or ""
+            if not doc_id:
+                continue
+            pairs.append(f"{doc_id}:{self.document_version(doc_id)}")
+        if not pairs:
+            return str(self.collection_version)
+        return hashlib.sha256("|".join(sorted(pairs)).encode()).hexdigest()[:16]
     # ── 读写：失败降级为未命中，不让缓存拖垮问答 ────────────
     def get(self, key: str) -> CacheEntry | None:
         try:

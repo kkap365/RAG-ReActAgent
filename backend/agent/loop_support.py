@@ -129,7 +129,7 @@ def build_answer_cache_key(
     return AnswerCache.compute_key(
         normalized_query=user_message,
         retrieval_hash=AnswerCache.retrieval_hash(sources),
-        collection_version=get_answer_cache().collection_version,
+        collection_version=get_answer_cache().deps_token(sources),
         model_name=settings.llm_model,
         prompt_version="v8-markdown-hardened",
         context_hash=scoped_context,

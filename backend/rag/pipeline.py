@@ -724,7 +724,8 @@ async def _process_document(doc_id: str, file_path: str, file_type: str):
 
             # V4: Invalidate answer cache on document change
             try:
-                from rag.answer_cache import bump_collection_version
+                from rag.answer_cache import bump_collection_version, bump_document_version
+                bump_document_version(doc_id)
                 bump_collection_version()
             except Exception:
                 pass

@@ -70,6 +70,15 @@ class AnswerCache:
                 self._collection_version, self._stale_evictions,
             )
             return self._collection_version
+    # ── 依赖版本 token ───────────────────────────────────────────
+
+    def deps_token(self, sources: list[dict]) -> str:
+        """缓存 key 里的版本 token。
+
+        基类保持原行为：返回全局 collection_version，任何 bump 都会让所有
+        条目失效。能追踪按文档版本号的子类覆写此方法，实现选择性失效。
+        """
+        return str(self.collection_version)
 
     # ── Cache key ─────────────────────────────────────────────────
 
@@ -256,3 +265,16 @@ def bump_collection_version() -> int:
     if not settings.rag_answer_cache_enabled:
         return -1
     return get_answer_cache().bump_collection_version()
+def bump_document_version(doc_id: str) -> int:
+    """按文档维度失效答案缓存。
+
+    Redis 后端支持精确失效；内存后端没有文档级版本，退回全局失效，
+    保证正确性优先于命中率。
+    """
+    if not settings.rag_answer_cache_enabled:
+        return -1
+    cache = get_answer_cache()
+    fn = getattr(cache, "bump_document_version", None)
+    if fn is None:
+        return cache.bump_collection_version()
+    return fn(doc_id)

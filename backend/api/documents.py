@@ -19,7 +19,7 @@ from storage.files import delete_file, find_upload
 from config import DOCUMENT_UPLOAD_HARD_LIMIT_MB, settings
 from models.database import get_db, session_scope
 from models.orm import DocStatus, Document
-from rag.answer_cache import bump_collection_version
+from rag.answer_cache import bump_collection_version, bump_document_version
 from rag.loaders import OCRModelNotReadyError
 from rag.pipeline import _mark_waiting_for_ocr, _process_document, ingest_document_from_staged
 
@@ -352,8 +352,10 @@ async def clear_all_documents(db: AsyncSession = Depends(get_db)):
             await _delete_document_source_by_attrs(storage_key, filename, file_type, file_hash)
         except Exception as e:
             logger.warning("clear_all file cleanup failed doc_id=%s: %s", doc_id, e)
-
+    for _doc_id, _sk, _fn, _ft, _fh in doc_attrs:
+        bump_document_version(_doc_id)
     bump_collection_version()
+
     await record_audit("document_clear_all",
                        detail=f"count={count}")
     return {"status": "cleared", "count": count}
@@ -396,7 +398,7 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
         await _delete_document_source_by_attrs(storage_key, filename, file_type, file_hash)
     except Exception as e:
         logger.warning("delete_document file cleanup failed doc_id=%s: %s", doc_id, e)
-
+    bump_document_version(doc_id)
     bump_collection_version()
     await record_audit("document_delete",
                        object_type="document", object_id=doc_id)
@@ -459,6 +461,7 @@ async def reprocess_document(doc_id: str, db: AsyncSession = Depends(get_db)):
         await db.rollback()
         raise HTTPException(409, "Document is already being processed")
     await db.commit()
+    bump_document_version(doc_id)
     bump_collection_version()
 
     from worker.tasks import get_task_manager
